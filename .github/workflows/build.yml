@@ -1,0 +1,68 @@
+name: Build GlassDesk (Win10)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'build.log'
+      - 'dist/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Reassemble source
+        shell: pwsh
+        run: |
+          "REASSEMBLE:$(Get-Date -Format o)" | Out-File build-output.txt
+          $b64 = (Get-ChildItem "tools/parts/*.part*" | Sort-Object Name | Get-Content -Raw) -join ""
+          [IO.File]::WriteAllBytes("$env:TEMP\src.tar.gz", [Convert]::FromBase64String($b64.Trim()))
+          tar -xzf "$env:TEMP\src.tar.gz"
+          "SRC_OK" | Out-File -Append build-output.txt
+          # placeholder assets
+          [IO.File]::WriteAllBytes("src/GlassDesk.App/Assets/GlassDeskBrand.png", [Convert]::FromBase64String((Get-Content "tools/placeholders/GlassDeskBrand.png.b64" -Raw).Trim()))
+          [IO.File]::WriteAllBytes("src/GlassDesk.AppServices/Resources/unihan-mandarin-17.txt", [Convert]::FromBase64String((Get-Content "tools/placeholders/unihan.txt.b64" -Raw).Trim()))
+          [IO.File]::WriteAllBytes("src/GlassDesk.App/Assets/GlassDesk.ico", [Convert]::FromBase64String((Get-Content "tools/placeholders/GlassDesk.ico.b64" -Raw).Trim()))
+          "ASSETS_OK" | Out-File -Append build-output.txt
+
+      - name: Build
+        shell: pwsh
+        run: |
+          "BUILD_START:$(Get-Date -Format o)" | Tee-Object -FilePath build-output.txt -Append
+          dotnet build src/GlassDesk.App/GlassDesk.App.csproj -c Release 2>&1 | Tee-Object -FilePath build-output.txt -Append
+          "DOTNET_EXIT:$LASTEXITCODE" | Tee-Object -FilePath build-output.txt -Append
+          if ($LASTEXITCODE -eq 0) { "BUILD SUCCESS" | Tee-Object -FilePath build-output.txt -Append } else { "BUILD FAILED" | Tee-Object -FilePath build-output.txt -Append; exit 1 }
+
+      - name: Package
+        if: success()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          dotnet publish src/GlassDesk.App/GlassDesk.App.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true -o dist/publish 2>&1 | Tee-Object -FilePath build-output.txt -Append
+          Compress-Archive -Path "dist/publish/*" -DestinationPath "dist/GlassDesk-win10.zip" -Force
+          "PACKAGED" | Out-File -Append build-output.txt
+          Copy-Item build-output.txt build.log -Force
+
+      - name: Commit results back
+        shell: pwsh
+        run: |
+          git config user.name "glassdesk-builder"
+          git config user.email "builder@local"
+          git add -f dist/GlassDesk-win10.zip build.log
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "build: update dist and log [skip ci]"
+            git push origin main
+          }
